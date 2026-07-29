@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# local Claude Code settings
+.claude/
+
+# local runtime files — never commit (configs may hold SMTP/Telegram secrets).
+# Real configs live in configs/, state in states/; only the example is tracked.
+configs/*
+!configs/config.example.json
+states/
+# legacy root-level locations, kept ignored so stragglers never get committed
+config.json
+config-*.json
+state.json
+state-*.json
+*.log
+logs/
+*.tmp
+__pycache__/
