@@ -1,16 +1,12 @@
 {
-  "_readme": "Copy to configs/config.json (or configs/config-<you>.json for a per-person setup — each config automatically pairs with its own states/state-<you>.json) and edit. Every key except \"classes\" is optional — omitted keys use the defaults shown here, which are already tuned for the fastest polite detection. Keys starting with _ are comments and are ignored.",
+  "_readme": "Copy to configs/config.json (or configs/config-<you>.json for a per-person setup — each config automatically pairs with its own states/state-<you>.json) and edit. Every key except \"classes\" is optional — omitted keys use the defaults shown here, which are already tuned for polite detection. Keys starting with _ are comments and are ignored.",
 
-  "_classes_note": "REQUIRED. Add both the LECTURE and your DISCUSSION/LAB section as separate entries: the waitlist only enrolls you if the linked discussion/lab also has an open seat (SIS FAQ #1056), so watch both. Each URL is a section content page from classes.berkeley.edu (open your class, click the specific section, copy the address).",
+  "_source_note": "Enrollment is read from BerkeleyTime's public GraphQL API (SIS-direct), NOT classes.berkeley.edu — whose SIS feed was observed lagging hours on real drops. Each poll is cache-busted so you get BerkeleyTime's freshest 15-min snapshot.",
+
+  "_classes_note": "REQUIRED. Each entry names ONE section in the same order as a class-schedule link (2026-fall-compsci-61a-001): year, semester, subject, number, section. Use the exact SIS subject code — COMPSCI, MEC ENG, PUB POL (not CS/ME/PP); case and internal spaces don't matter. \"semester\" is Fall / Spring / Summer. Each entry carries its own year+semester, so you can watch different terms at once. The section NUMBER alone identifies the section, so a discussion/lab is just its own number (e.g. 101) — no LEC/DIS/LAB needed. Add both the LECTURE and your DISCUSSION/LAB as separate entries: the waitlist only enrolls you if the linked discussion/lab also has an open seat (SIS FAQ #1056), so watch both. Alerts/logs label each section as \"SUBJECT NUMBER SECTION\".",
   "classes": [
-    {
-      "name": "CS 61A (LEC 001)",
-      "url": "https://classes.berkeley.edu/content/2026-fall-compsci-61a-001-lec-001"
-    },
-    {
-      "name": "CS 61A (DIS 101)",
-      "url": "https://classes.berkeley.edu/content/2026-fall-compsci-61a-101-dis-101"
-    }
+    {"year": 2026, "semester": "Fall", "subject": "COMPSCI", "number": "61A", "section": "001"},
+    {"year": 2026, "semester": "Fall", "subject": "COMPSCI", "number": "61A", "section": "101"}
   ],
 
   "_reserved_groups_note": "Who YOU are — majors/minors/programs whose reserved seats you can snipe. Each entry is either text substring-matched (case-insensitive) against a reserved-seat group description (\"Statistics\" matches \"Statistics Majors\"; \"Computer Science\" matches the long EECS/CS/ECE list) or an all-digit requirement-group code matched exactly (\"001600\" or \"1600\"). Prefix a token with ! to EXCLUDE blocks it hits even when another token matches — e.g. [\"Computer Science\", \"!Transfer\"] skips 'Computer Science Majors: New Transfer Students'. Run  python3 snipe.py --show-reserved  to print your classes' actual groups verbatim and copy from there. Leave empty if none apply — then only unreserved seats count as yours. (\"Students with Enrollment Permission\" seats are SID-held and never text-match.) Also settable per class inside a classes[] entry.",
@@ -19,17 +15,8 @@
   "_alert_on_note": "Default: [\"eligible\"] — ping when the number of open seats YOU can snipe goes up (open unreserved + open reserved for your reserved_groups; with no groups set, just open unreserved). Other triggers: \"*\" (ANY open-seat increase, reserved included — use this to see everything), \"unreserved\" (open unreserved seats, snipeable by anyone), \"reserved\" (open reserved count rises — held for a group, snipeable only if it's yours), \"waitlist\" (a spot on the waitlist opens up — the waitlist was full and now has room to get in line, not merely the line advancing), \"capacity\" (max capacity rises — the course was expanded), \"status\" (status flips to Open). Combine freely, e.g. [\"eligible\", \"waitlist\"]. Also settable per class inside a classes[] entry.",
   "alert_on": ["eligible"],
 
-  "_poll_interval_note": "Default 60. With fast_poll this is roughly your detection latency. Keep it >= 60 (>= 30 at the very lowest): the fragment endpoint is uncached, so every poll reaches the origin.",
-  "poll_interval_seconds": 60,
-
-  "_fast_poll_note": "Default true. Reads real-time seat/waitlist counts from the UNCACHED associated-sections fragment (/sections/associated/<node>), so detection latency ~= poll_interval_seconds instead of the ~15-min page cache. Probe discovery is automatic; several watched sections of one course share a single fragment request per poll. When the numbers move, the reserved breakdown is fetched from the uncached ajax variant (real-time); full section pages are fetched only every content_refresh_seconds for status + group codes. Set false (or pass --no-fast-poll) for the v0.2 full-page-only behavior.",
-  "fast_poll": true,
-
-  "_content_refresh_note": "Default 450. Fast mode only: how often to refresh the full section page for O/W/C status + requirement-group codes. The reserved OPEN counts are read live from the uncached ajax variant on every change, so this only affects the rarely-changing status label and the requirement-group codes; live seat/reserved counts never depend on it.",
-  "content_refresh_seconds": 450,
-
-  "_bust_cache_note": "Default true. Affects FULL-PAGE fetches only (all legacy-mode polls; fast-mode periodic refreshes — the change-triggered reserved fetch uses the always-uncached ajax variant). Pages sit behind a Fastly CDN + Drupal caches (max-age=900); busting appends a unique query param that misses the CDN/edge cache, roughly HALVING page staleness (worst ~30 min -> ~15 min). It does NOT reach real-time: the origin dynamic render cache (~15 min) can't be bypassed from outside — that's what the fragment tier is for.",
-  "bust_cache": true,
+  "_poll_interval_note": "Default 300 (5 min). BerkeleyTime's data only moves every ~15 min, so detection latency is roughly 15 min + this interval; polling much faster just loads a volunteer-run service without fresher data. Keep it >= 60.",
+  "poll_interval_seconds": 300,
 
   "_alert_pacing_note": "Both default 0 (off). alert_cooldown_seconds suppresses a repeat of the same alert kind within N seconds (anti-spam when a seat flickers). repeat_while_open_seconds re-pings every N seconds while seats stay snipeable, so the first alert isn't the only one.",
   "alert_cooldown_seconds": 0,

@@ -1,5 +1,13 @@
 # The Berkeley Waitlist Auto-Enrollment "Window"
 
+> **Update 2026-08-02:** The app has switched its data source from
+> `classes.berkeley.edu` to **BerkeleyTime's public GraphQL API**. Real-world
+> testing showed the SIS → `classes.berkeley.edu` feed lags **hours** and arrives
+> in delayed bursts, so *uncached HTTP ≠ fresh data* — which supersedes the
+> §2.4/§2.5 conclusion to scrape the associated-sections fragment (that discussion
+> is now **historical**). The waitlist-window mechanism itself — *why* the window
+> between a drop and the next batch run exists (§1, §4) — still stands unchanged.
+
 > **Status:** Living document — continuously refined by an automated agent loop.
 > **Last human-seeded:** 2026-07-29. **Refinement:** see `refine-doc-loop` (self-paced agent).
 > **Confidence tags:** ✅ confirmed from official UCB sources · 🟡 plausible/partly-official · 🔴 vendor/marketing claim, unverified.

@@ -1,53 +1,56 @@
 # cal-seat-sniper
 
 A tiny, dependency-free watcher for UC Berkeley class seats. It reads a section's
-**real-time** enrollment numbers from a public, *uncached* endpoint on
-`classes.berkeley.edu` and **notifies you the instant a seat becomes snipeable** —
-your cue to fire a pre-staged enroll in CalCentral during the "window" between
-someone dropping and the next waitlist batch run. Detection latency ≈ your poll
-interval (default 1 min), not the site's ~15-minute page cache.
+enrollment numbers from **BerkeleyTime's public GraphQL API** — which pulls
+Berkeley's **official SIS** data directly every ~15 minutes — and **notifies you
+when a seat becomes snipeable**, your cue to fire a pre-staged enroll in CalCentral
+during the "window" between someone dropping and the next waitlist batch run.
+
+It used to scrape `classes.berkeley.edu`. That was dropped: those pages have
+*uncached HTTP* but are fed from SIS by a separate import job that was observed
+lagging **hours** on real enrollment changes, so a fresh-looking pull couldn't be
+trusted as current (see *Why not classes.berkeley.edu?* below). BerkeleyTime is an
+independent consumer of the same SIS Class API, so it tracks enrollment reliably —
+at the cost of a hard ~15-minute freshness floor. Detection latency is therefore
+**~15 min + your poll interval**: not real-time, but trustworthy, which is the
+whole point of the switch.
 
 This does, locally and for free, the core of what a paid service like
 `waitlistwarrior.net` does. See `berkeley-waitlist-window.md` for the full
-mechanism (why the window exists, §1.1 and §4) and the exact data source (§2.4).
+mechanism (why the window exists, §1.1 and §4).
 
 ## How it works
 
-The watcher combines **three public data sources** (all three verified against the live site):
+The watcher's **sole data source is BerkeleyTime's public GraphQL API**
+(`https://berkeleytime.com/api/graphql`, unauthenticated). For each watched
+section it runs one query:
 
-1. **Real-time change detector — the associated-sections fragment.** Every
-   section page loads its "Associated Sections" table from
-   `/sections/associated/<node_id>`, and that fragment is served **uncached**
-   (`cache-control: no-cache`, `x-drupal-cache: UNCACHEABLE`, a Fastly `MISS`
-   with `age: 0` on every hit). Each row carries live **Open Seats, Enrolled,
-   Enrollment Limit, Waitlisted, Waitlist limit** for one section of the
-   course. One gotcha: the fragment lists every section of the course *except*
-   the node you asked for — so the watcher reads your section through a
-   sibling **"probe"** section's fragment, discovered automatically on the
-   first poll (and shared, so several watched sections of one course cost a
-   single request per poll).
+```
+enrollment(year, semester, subject, courseNumber, sectionNumber) { latest { … } }
+```
 
-2. **Detail source — the section content page.** Its HTML embeds a JSON blob at
-   `drupalSettings.ucb.enrollment.available.enrollmentStatus` with
-   `status.code` (**`O` = Open**, `W` = Waitlist, `C` = Closed),
-   `enrolledCount`, `maxEnroll` (capacity), `waitlistedCount`, `maxWaitlist`,
-   `reservedCount`, `openReserved`, and the per-group `seatReservations[]`
-   breakdown the fragment lacks. This page sits behind ~15-minute caches, so
-   it's polled only for the `O`/`W`/`C` status and requirement-group codes on a
-   slow refresh (`content_refresh_seconds`, default 450).
+`latest` is the most recent 15-minute snapshot and carries **everything this
+watcher needs**: the status flag, `enrolledCount`, `maxEnroll` (capacity),
+`waitlistedCount`, `maxWaitlist`, `openReserved`, and the full
+per-group `seatReservationCount[]` breakdown (each with a requirement-group **code
++ description** and its own enrolled/max counts). Because that single object has
+the open counts *and* the reserved breakdown, there's nothing else to fetch —
+`classes.berkeley.edu` is never contacted.
 
-3. **Real-time reserved breakdown — the uncached ajax variant.** The same
-   content rendered via `…/content/<slug>?_wrapper_format=drupal_ajax` is served
-   **uncached** (`x-drupal-dynamic-cache: UNCACHEABLE`, `age: 0` every hit). On a
-   detected change the watcher reads the live per-group open-reserved counts from
-   it, so *"a seat reserved for **my** major just opened"* is detected in real
-   time, not gated by the ~15-minute page cache. (It carries group descriptions
-   but no codes, so codes are enriched from tier 2.)
+**You name each section directly in the config**, in the same order as a
+class-schedule link (`2026-fall-compsci-61a-001`): `year`, `semester`, `subject`,
+`number`, `section` — the five coordinates the query needs. Use the exact SIS
+subject code (`COMPSCI`, `MEC ENG`, `PUB POL` — not `CS`/`ME`/`PP`; case and
+internal spaces don't matter); `semester` is `Fall`/`Spring`/`Summer`. The section
+**number** alone identifies a section, so a discussion/lab is just its own number
+(e.g. `101`) — no `LEC`/`DIS`/`LAB` type needed. Year+semester are per-class, so
+you can watch different terms at once.
 
-**Open seats = `capacity − enrolled`.** The live open/waitlist counts come
-from the fragment; on any change the reserved breakdown is refreshed live from
-the ajax variant. Only the `O`/`W`/`C` status label and the requirement-group codes ride the
-slow page refresh.
+**Open seats = `capacity − enrolled`.** Per-group reserved opens come from
+`seatReservationCount[]` (`open = maxEnroll − enrolledCount` per block). The
+`O`/`W`/`C` status label is reconstructed from BerkeleyTime's Open/Closed flag plus
+the live counts (open seats → Open; else full but waitlist has room → Waitlist;
+else Closed).
 
 Alerts are based on which triggers you list in `"alert_on"`:
 
@@ -62,9 +65,9 @@ grows, and **`status`** when the section's status flips to Open.
 | **`*`** | The **total** number of open seats goes up (`capacity − enrolled` increases) — a spot just freed, whether or not it's reserved. Use this to see *everything*, e.g. if you might have an enrollment permission coming. | off |
 | **`unreserved`** | Only the **unreserved** open count goes up (`capacity − enrolled − open_reserved`). Same as the default when you have no `"reserved_groups"`. | off |
 | **`reserved`** | Only the **reserved** open count goes up — a seat opened that's held for some group. Snipeable only if that group is one of yours; if it is, use `eligible` instead, which already folds your groups in. | off |
-| **`waitlist`** | A **spot on the waitlist opens** — the waitlist was full and now has room to get in line. (The waitlist limit is read live from the same uncached fragment as the seat counts.) This is *not* the same as the line merely advancing. | off |
+| **`waitlist`** | A **spot on the waitlist opens** — the waitlist was full and now has room to get in line. (The waitlist limit `maxWaitlist` comes from the same snapshot as the seat counts.) This is *not* the same as the line merely advancing. | off |
 | **`capacity`** | The section's **max capacity** goes up — the department *expanded* the course (more total seats), independent of whether any are open yet. | off |
-| **`status`** | The section's status flips to **Open**. Informational: the alert says whether it's snipeable or "Open but all seats reserved." (The `O`/`W`/`C` status label — which, along with the requirement-group codes, is one of the only values riding the cached page — can lag a pure status flip by the page-refresh cadence in fast mode; every open-count trigger above is real-time.) | off |
+| **`status`** | The section's status flips to **Open**. Informational: the alert says whether it's snipeable or "Open but all seats reserved." | off |
 
 **How the default works:** a section can read `open 36` where all 36 are reserved
 for CS/EECS majors — meaningless to a non-major, fully snipeable if you *are* the
@@ -74,14 +77,40 @@ only when *that* number goes up. Haven't set any groups? It gracefully counts ju
 the unreserved. If instead you want a ping on **every** open seat — reserved
 for anyone or not — set `"alert_on": ["*"]`.
 
+## Why not classes.berkeley.edu?
+
+Earlier versions read the Berkeley Class Schedule's *uncached* endpoints — the
+associated-sections fragment and the `?_wrapper_format=drupal_ajax` variant. Those
+endpoints really do bypass the CDN/Drupal HTTP caches (`age: 0`, `UNCACHEABLE` on
+every hit) — that part was correct.
+
+**The flaw: "uncached HTTP" is not the same as "fresh data."**
+`classes.berkeley.edu` is a Drupal site that renders those endpoints from its
+**own database**, which is fed from SIS by a **separate import job**. The uncached
+headers only prove the HTTP response was rebuilt per request — not that the
+underlying database reflects current SIS enrollment.
+
+**In practice that feed was unreliable.** The SIS → `classes.berkeley.edu` import
+was observed lagging **hours** on real enrollment changes (one drop took ~5–7 hours
+to appear), was inconsistent in *both* directions (enrolls sometimes showed in 2–3
+min, sometimes not), and delivered changes **late and in abrupt batches** — so a
+fresh-looking pull could not be trusted as current. That is fatal for
+time-sensitive seat sniping.
+
+**BerkeleyTime avoids this because it is not downstream of the Class Schedule.**
+It's an independent, sibling consumer that pulls the **official SIS Class API**
+(`gateway.api.berkeley.edu/sis`) directly, on its own schedule — so it tracks SIS
+far more reliably than the laggy Class Schedule feed. The trade-off is a fixed
+15-minute refresh cadence (see *Data freshness*), which is a price worth paying for
+data you can trust.
+
 ## Reserved seats & `reserved_groups` — only alert on seats YOU can snipe
 
 Departments reserve blocks of seats for specific student populations (SIS "reserve
-capacities"). Each block appears in the section page's JSON as a `seatReservations[]`
+capacities"). Each block appears in BerkeleyTime's `seatReservationCount[]` as an
 entry with a **requirement group** — a code plus a human-readable description — and
-its own held/taken counts, so **seats still open to that group = that block's open
-count** (these per-group opens sum to the section's total `open_reserved`; verified
-live 2026-07-31).
+its own enrolled/max counts, so **seats still open to that group = that block's open
+count** (these per-group opens sum to the section's total `open_reserved`).
 
 List what you are in `"reserved_groups"` (globally, or per class inside a `classes[]`
 entry to override) — the default `eligible` trigger then counts those reserved
@@ -129,7 +158,7 @@ python3 snipe.py --show-reserved
 ```
 
 ```
-CS 188 (LEC 001) — open 221 (0 unreserved, 221 reserved)
+COMPSCI 188 001 — open 221 (0 unreserved, 221 reserved)
      66 open | code 001600 | "Undergraduate Students: Electrical Engineering & Computer Science, ..."
     144 open | code 000055 | "Students with Enrollment Permission"  <- held for specific students by SID; NOT snipeable via a group
       7 open | code 001232 | "Master of Design Students"
@@ -137,12 +166,9 @@ CS 188 (LEC 001) — open 221 (0 unreserved, 221 reserved)
 ```
 
 (The same info is on the class's page on classes.berkeley.edu under "Reserved
-Seats".) The per-group breakdown is refreshed from the **uncached** ajax variant
-on every detected change, so `eligible` reflects the live reserved counts
-in real time — not the ~15-minute-cached page. (Requirement-group *codes* still
-come from the slow page refresh, so a reservation block added mid-term is
-matchable by its code only after the next page refresh; its description text
-matches immediately.)
+Seats".) The per-group breakdown — codes *and* descriptions — comes from the same
+BerkeleyTime snapshot as the seat counts, so `eligible` reflects the reserved
+counts as of the newest 15-minute snapshot, matchable by either text or code.
 
 Set triggers in your config, e.g. `"alert_on": ["*", "waitlist"]`. You can also
 set a **per-class** `"alert_on"` inside any `classes[]` entry to override the global
@@ -156,8 +182,8 @@ default `0` = off, preserving the fire-on-every-change behavior):
 - `"repeat_while_open_seconds"` — if seats stay open, re-ping every this many seconds so
   a still-snipeable seat doesn't go silent after the first alert.
 
-No CalNet, no login, no gated API, no third-party server. It only reads public
-pages — it never touches CalCentral. It can't enroll for you; it tells you *when*.
+No CalNet, no login, no gated API key. It only reads BerkeleyTime's public API —
+it never touches CalCentral. It can't enroll for you; it tells you *when*.
 
 ## Requirements
 
@@ -176,17 +202,20 @@ cp configs/config.example.json configs/config.json
 
 Then edit `configs/config.json`:
 
-1. **Get each class URL.** On `classes.berkeley.edu`, search your course, click the
-   **specific section** you want, and copy the URL from the address bar. It looks
-   like `https://classes.berkeley.edu/content/2026-fall-compsci-61a-001-lec-001`.
-   (You need the section's *content* page — not a search results URL.)
-2. Add one `{ "name": ..., "url": ... }` entry per section under `"classes"`.
+1. **Name each section** in class-schedule order — `year`, `semester`, `subject`,
+   `number`, `section` — one entry per section under `"classes"`, e.g.
+   `{ "year": 2026, "semester": "Fall", "subject": "COMPSCI", "number": "61A", "section": "001" }`.
+   Use the exact SIS subject code (`COMPSCI`, `MEC ENG`, `PUB POL`); the section
+   number identifies the section (a discussion is just its own number, e.g. `101`).
+   Alerts and logs label each section as `SUBJECT NUMBER SECTION`.
+2. Add both the **lecture** and your **discussion/lab** as separate entries (see
+   *Notes & caveats*). Year+semester are per-class, so different terms can coexist.
 3. Optionally list your majors/programs in `"reserved_groups"` (see the section
    above) — run `--show-reserved` to see the exact group names on your classes.
-4. Every other key is optional; the defaults (60 s polls, fast polling,
-   cache-busting on) are already tuned for the fastest polite detection. Keep
-   `"poll_interval_seconds"` ≥ 60, or ≥ 30 at the very lowest; see *Be polite*
-   below. With fast polling this interval ≈ your detection latency.
+4. Every other key is optional; the defaults (5-minute polls) are already tuned for
+   polite detection. Keep `"poll_interval_seconds"` ≥ 60 — BerkeleyTime's data only
+   moves every ~15 min, so faster polling just loads a volunteer-run service without
+   getting fresher data (see *Be polite* below).
 
 **Watching for several people?** Make one config each — `configs/config-alice.json`,
 `configs/config-bob.json` — with their own classes, `reserved_groups`, and
@@ -206,12 +235,10 @@ python3 snipe.py --config configs/config-alice.json   # use another config file
 python3 snipe.py --once          # one poll of all classes, then exit (good for testing)
 python3 snipe.py --list          # print the configured classes and exit
 python3 snipe.py --show-reserved # print each class's reserved-seat groups and exit
-python3 snipe.py --interval 90   # override poll_interval_seconds for this run
-python3 snipe.py --url "https://classes.berkeley.edu/content/2026-fall-compsci-61a-001-lec-001"
+python3 snipe.py --interval 600  # override poll_interval_seconds for this run
+python3 snipe.py --class "2026:Fall:COMPSCI:161:001"  # watch one section, no config file
 python3 snipe.py --state states/other.json  # override the auto-paired state file
 python3 snipe.py --test-notify   # send a test notification and exit
-python3 snipe.py --no-fast-poll  # legacy mode: full-page polls only (v0.2 behavior)
-python3 snipe.py --bust-cache    # force cache-busting on (it's already the default)
 python3 snipe.py -v              # verbose (show retries/debug); -q for alerts-only
 python3 snipe.py --logfile snipe.log   # also append logs to a file
 python3 snipe.py --version       # print the version and exit
@@ -221,13 +248,10 @@ python3 snipe.py --version       # print the version and exit
 
 | Key | Default | Meaning |
 |---|---|---|
-| `classes` | *(required)* | `{"name", "url"}` per watched section; optional per-class `"alert_on"` and `"reserved_groups"` override the globals for that section |
+| `classes` | *(required)* | one entry per section, in slug order: `{"year", "semester", "subject", "number", "section"}` (e.g. `2026`, `"Fall"`, `"COMPSCI"`, `"161"`, `"001"`); optional per-class `"alert_on"` / `"reserved_groups"` override the globals |
 | `reserved_groups` | `[]` | who you are: description substrings, digit codes, `!`-prefixed exclusions |
 | `alert_on` | `["eligible"]` | any of `eligible`, `*`, `unreserved`, `reserved`, `waitlist`, `capacity`, `status` |
-| `poll_interval_seconds` | `60` | ≈ detection latency in fast mode; keep ≥ 60 (below 30 the app warns loudly) |
-| `fast_poll` | `true` | real-time fragment tier; `false` = v0.2 full-page polling |
-| `content_refresh_seconds` | `450` | fast mode: page-refresh cadence for O/W/C status + group codes (reserved counts are live from the ajax tier) |
-| `bust_cache` | `true` | cache-bust full-page fetches (edge cache only) |
+| `poll_interval_seconds` | `300` | seconds between polls; detection latency ≈ 15 min + this; keep ≥ 60 (below it the app warns) |
 | `alert_cooldown_seconds` | `0` | suppress same-kind repeats within N s (anti-flicker) |
 | `repeat_while_open_seconds` | `0` | re-ping every N s while seats stay snipeable |
 | `notify.desktop` / `notify.sound_name` | `true` / `"Glass"` | native notification + macOS sound |
@@ -239,36 +263,28 @@ python3 snipe.py --version       # print the version and exit
 - **One coalesced ping per poll.** If several triggers fire for the same class at
   once (e.g. a seat opened *and* a waitlist spot opened), you get one notification
   listing everything.
-- **Probe discovery is persistent and self-healing.** The sibling probe found on
-  the first poll is saved to the state file (restarts skip discovery); if your
-  section vanishes from the probe's fragment, the watcher re-discovers a new probe
-  on the next poll.
-- **Fragment outages can't corrupt alerts.** If the fragment tier fails
-  transiently, the watcher repeats the last live reading instead of adopting
-  ~15-min-stale page counts (which could fire phantom alerts or swallow a real
-  drop on recovery). After 5 consecutive failures it degrades to full-page
-  polling and re-tries the fragment tier every ~15 minutes.
-- **Real-time reserved fetch degrades gracefully.** If the uncached ajax fetch
-  fails on a change, the watcher falls back to the last cached reserved
-  breakdown for that poll rather than erroring.
-- **Persistent 404s get one loud warning.** A section page that keeps 404ing
-  (renumbered section / ended course) triggers a single "fix this URL"
+- **Stale-data warnings.** BerkeleyTime's datapuller only runs while a term is in
+  its self-service enrollment window (and covers undergraduate sections). When the
+  newest snapshot is older than ~30 min the watcher logs a staleness warning, so a
+  frozen reading never looks live.
+- **A missing section gets one loud warning.** A section BerkeleyTime can't
+  resolve (wrong subject/number/section, or a term it doesn't pull) keeps failing;
+  after a few consecutive misses the watcher fires a single "fix this class"
   notification instead of silent per-poll skips.
 - **Transient network errors are retried** (3 attempts, exponential backoff),
   every outbound request is spaced ~0.75 s from the last with per-poll jitter, and
-  responses are gzip-compressed (~96% less transfer), so the watcher never bursts
-  the server.
-- **State survives restarts.** Baselines, probe discovery, and alert cooldowns are
-  persisted after every poll — restarting never re-alerts on unchanged classes.
+  responses are gzip-compressed, so the watcher never bursts the API.
+- **State survives restarts.** Baselines and alert cooldowns are persisted after
+  every poll — restarting never re-alerts on unchanged classes.
 
 Example output (timestamps are in Pacific time; here the watcher has
 `"reserved_groups": ["Non-EECS Declared Engineering Majors"]`, so the freed
 reserved seat counts as snipeable):
 
 ```
-2026-07-29 14:03:11 PDT  CS 161 (LEC 001): OPEN | enrolled 145/180 | open 35 (35 eligible, 0 unreserved, 35 reserved) | waitlist 60/300
-2026-07-29 14:05:20 PDT  CS 161 (LEC 001): OPEN | enrolled 144/180 | open 36 (36 eligible, 0 unreserved, 36 reserved) | waitlist 60/300
-2026-07-29 14:05:20 PDT  >>> ALERT: CS 161 (LEC 001): 36 seat(s) YOU can snipe (0 unreserved + 36 reserved for your group(s); 144/180) — enroll now!
+2026-07-29 14:03:11 PDT  COMPSCI 161 001: OPEN | enrolled 145/180 | open 35 (35 eligible, 0 unreserved, 35 reserved) | waitlist 60/300
+2026-07-29 14:05:20 PDT  COMPSCI 161 001: OPEN | enrolled 144/180 | open 36 (36 eligible, 0 unreserved, 36 reserved) | waitlist 60/300
+2026-07-29 14:05:20 PDT  >>> ALERT: COMPSCI 161 001: 36 seat(s) YOU can snipe (0 unreserved + 36 reserved for your group(s); 144/180) — enroll now!
 ```
 
 (The status line breaks the open count down — e.g. `open 36 (36 eligible,
@@ -292,39 +308,34 @@ pkill -f "snipe.py"
 
 ## Data freshness
 
-**Fast polling (default, `"fast_poll": true`).** The associated-sections fragment
-is uncached, so seat/waitlist changes are visible the moment they happen —
-**detection latency ≈ your poll interval**. When the numbers move, the watcher
-reads the live per-group reserved breakdown from the **uncached ajax variant**,
-so both the total open count *and* which group a freed seat belongs to are
-real-time — `eligible` fires the moment a seat you can snipe opens. The only
-values that ride the ~15-minute page cache are the `O`/`W`/`C` status label
-(used by the opt-in `status` trigger) and the requirement-group codes.
+**The 15-minute floor.** BerkeleyTime's datapuller refreshes enrollment from SIS
+**every 15 minutes** — a hard floor. There is no live-SIS passthrough; every read
+returns the most recent 15-minute snapshot. So detection latency is
+**~15 min + your poll interval**. That is *not* real-time — but it is **reliable**,
+which the old `classes.berkeley.edu` feed was not. Trustworthy-but-15-min beats
+fresh-looking-but-hours-stale, and that reliability is the whole point of the
+switch.
 
-Steady-state request cost: **one fragment request per course per poll** (shared
-across watched sections of the same course); on a change, one uncached ajax fetch
-for the reserved breakdown; and a plain-page fetch only every
-`content_refresh_seconds` (default 450) to refresh status + codes.
+**Why polling faster is pointless.** BerkeleyTime fronts its API with a shared
+response cache (annotated up to ~1 hour). The watcher defeats it by sending a
+**unique `sessionId` header on every request** — BerkeleyTime folds that value into
+its GraphQL cache key, so each poll misses the shared cache and gets the freshest
+15-minute snapshot. But the *snapshot itself* still only updates every 15 min, so
+polling faster than that just loads the origin without ever seeing fresher data.
 
-**Legacy mode (`--no-fast-poll`).** Polls only the section pages, which sit
-behind two stacked ~15-minute caches (measured): a **Fastly CDN** edge cache
-(`max-age=900`) and, at the origin, a **Drupal dynamic render cache**. A plain
-scrape detects a change in **~15 min on average, ~30 min worst case**.
-`bust_cache` (config key, or the `--bust-cache` flag) appends a unique query
-param that misses the CDN/edge cache — roughly **halving** that latency (worst
-~30 → ~15 min); the origin render cache can't be bypassed from the public side.
-In fast mode `bust_cache` only affects the periodic full-page refreshes (the
-change-triggered reserved fetch uses the always-uncached ajax variant). It
-defaults to **true** since v0.3, so there's nothing to enable — set
-`"bust_cache": false` to opt out.
+**All sections in one request.** Every poll fetches all watched sections in a
+single GraphQL query using field aliases (chunked at 15, BerkeleyTime's alias cap),
+so a whole watchlist costs one origin hit per poll, not one per class. A section
+that's missing or errors is isolated to its own slot and never sinks the rest.
 
-**Why not use BerkeleyTime instead?** BerkeleyTime samples the same data only
-~every 15 min and stores change-history (median ~1.3h between recorded snapshots),
-so it's a historical-trends tool, not a live feed — far staler than the fragment
-feed this watcher reads, and it can't be sped up. `classes.berkeley.edu` is the official, upstream source. The only
-truly live enrollment view is **CalCentral/SIS** (authenticated), which this tool
-deliberately never touches. See `berkeley-waitlist-window.md` §2.5 for the full
-measurement.
+**When the data is frozen.** The datapuller only runs while a term is in its
+**self-service enrollment window**, and it covers **undergraduate (UGRD)** sections.
+Outside those, the data doesn't move — so the watcher logs a **staleness warning**
+whenever the newest snapshot is older than ~30 min (puller idle, or a non-UGRD
+section).
+
+**The only live view** is **CalCentral/SIS** (authenticated), which this tool
+deliberately never touches.
 
 ## Optional alert channels
 
@@ -411,20 +422,20 @@ python3 snipe.py
   information*, not certainty. See `berkeley-waitlist-window.md` §1.1 / §4.
 - **Manual-waitlist sections** are picked by the department by hand — speed won't
   help there (doc §4.1).
-- **Be polite (this matters).** Berkeley's Acceptable Use policy prohibits
-  interfering with normal operation of its systems. A 1–2 minute cadence per class
-  is low-impact and fine; do **not** crank the interval down to hammer the server —
-  the fragment endpoint is uncached, so every hit reaches the origin. The watcher
-  also spaces its own requests ~0.75s apart, well under the server's burst rate
-  limit (observed around ~220 rapid requests). This tool reads public pages only,
-  at a gentle rate, with an honest User-Agent.
+- **Be polite (this matters).** **BerkeleyTime is a volunteer-run ASUC service.**
+  Because every poll is cache-busted, each hit reaches its origin — and since the
+  data only moves every 15 min, polling fast buys nothing but load. The default
+  poll is 5 min and the tool warns below 60 s; do **not** crank it down. The watcher
+  also spaces its own requests ~0.75 s apart and gzips responses, so it stays gentle
+  on the API. Reads public data only, with an honest User-Agent.
 - Not affiliated with UC Berkeley or with waitlistwarrior.net.
 
 ## Development
 
-Offline unit tests (parsers against saved page/fragment fixtures, the fast-poll
-flow against a faked server, alert transitions, cooldown, config validation) live
-in `tests/`:
+Offline unit tests (class-entry → query-coords parsing, the GraphQL query shape,
+snapshot normalization against faked BerkeleyTime responses, status derivation,
+staleness detection, alert transitions, cooldown, coalescing, and config
+validation) live in `tests/`:
 
 ```bash
 python3 -m unittest discover -s tests
